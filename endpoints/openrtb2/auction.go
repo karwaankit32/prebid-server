@@ -210,6 +210,9 @@ func (deps *endpointDeps) Auction(w http.ResponseWriter, r *http.Request, _ http
 	ctx := context.Background()
 
 	timeout := deps.cfg.AuctionTimeouts.LimitAuctionTimeout(time.Duration(req.TMax) * time.Millisecond)
+	if deps.tmaxAdjustments != nil && deps.tmaxAdjustments.UpstreamResponseBuffer > 0 {
+		timeout -= time.Duration(deps.tmaxAdjustments.UpstreamResponseBuffer) * time.Millisecond
+	}
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, start.Add(timeout))

@@ -11,6 +11,7 @@ type TmaxAdjustmentsPreprocessed struct {
 	BidderNetworkLatencyBuffer     uint
 	PBSResponsePreparationDuration uint
 	BidderResponseDurationMin      uint
+	UpstreamResponseBuffer         uint
 
 	IsEnforced bool
 }
@@ -27,6 +28,7 @@ func ProcessTMaxAdjustments(adjustmentsConfig config.TmaxAdjustments) *TmaxAdjus
 		BidderNetworkLatencyBuffer:     adjustmentsConfig.BidderNetworkLatencyBuffer,
 		PBSResponsePreparationDuration: adjustmentsConfig.PBSResponsePreparationDuration,
 		BidderResponseDurationMin:      adjustmentsConfig.BidderResponseDurationMin,
+		UpstreamResponseBuffer:         adjustmentsConfig.UpstreamResponseBuffer,
 		IsEnforced:                     isEnforced,
 	}
 

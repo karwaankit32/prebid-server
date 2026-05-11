@@ -1278,6 +1278,7 @@ func SetupViper(v *viper.Viper, filename string, bidderInfos BidderInfos) {
 	v.SetDefault("tmax_adjustments.bidder_response_duration_min_ms", 0)
 	v.SetDefault("tmax_adjustments.bidder_network_latency_buffer_ms", 0)
 	v.SetDefault("tmax_adjustments.pbs_response_preparation_duration_ms", 0)
+	v.SetDefault("tmax_adjustments.upstream_response_buffer_ms", 0)
 
 	v.SetDefault("tmax_default", 0)
 
@@ -1422,4 +1423,8 @@ type TmaxAdjustments struct {
 	// BidderResponseDurationMin is the minimum amount of time expected to get a response from a bidder request.
 	// PBS won't send a request to the bidder if the bidder tmax calculated is less than the BidderResponseDurationMin value
 	BidderResponseDurationMin uint `mapstructure:"bidder_response_duration_min_ms"`
+	// UpstreamResponseBuffer accounts for time reserved for PBS to send the response back to the upstream caller.
+	// This value is subtracted from the auction context deadline so that PBS can finish and respond within the original tmax.
+	// A value of 0 indicates no buffer should be applied.
+	UpstreamResponseBuffer uint `mapstructure:"upstream_response_buffer_ms"`
 }

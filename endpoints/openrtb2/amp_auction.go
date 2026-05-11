@@ -180,7 +180,15 @@ func (deps *endpointDeps) AmpAuction(w http.ResponseWriter, r *http.Request, _ h
 	ctx := context.Background()
 	var cancel context.CancelFunc
 	if reqWrapper.TMax > 0 {
-		ctx, cancel = context.WithDeadline(ctx, start.Add(time.Duration(reqWrapper.TMax)*time.Millisecond))
+		ampTimeout := time.Duration(reqWrapper.TMax) * time.Millisecond
+		if deps.tmaxAdjustments != nil && deps.tmaxAdjustments.UpstreamResponseBuffer > 0 {
+			ampTimeout -= time.Duration(deps.tmaxAdjustments.UpstreamResponseBuffer) * time.Millisecond
+		}
+		if ampTimeout > 0 {
+			ctx, cancel = context.WithDeadline(ctx, start.Add(ampTimeout))
+		} else {
+			ctx, cancel = context.WithDeadline(ctx, start)
+		}
 	} else {
 		ctx, cancel = context.WithDeadline(ctx, start.Add(time.Duration(defaultAmpRequestTimeoutMillis)*time.Millisecond))
 	}

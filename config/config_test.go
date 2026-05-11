@@ -240,6 +240,7 @@ func TestDefaults(t *testing.T) {
 	cmpUnsignedInts(t, "tmax_adjustments.bidder_response_duration_min_ms", 0, cfg.TmaxAdjustments.BidderResponseDurationMin)
 	cmpUnsignedInts(t, "tmax_adjustments.bidder_network_latency_buffer_ms", 0, cfg.TmaxAdjustments.BidderNetworkLatencyBuffer)
 	cmpUnsignedInts(t, "tmax_adjustments.pbs_response_preparation_duration_ms", 0, cfg.TmaxAdjustments.PBSResponsePreparationDuration)
+	cmpUnsignedInts(t, "tmax_adjustments.upstream_response_buffer_ms", 0, cfg.TmaxAdjustments.UpstreamResponseBuffer)
 
 	cmpInts(t, "tmax_default", 0, cfg.TmaxDefault)
 
@@ -589,6 +590,7 @@ tmax_adjustments:
   bidder_response_duration_min_ms: 700
   bidder_network_latency_buffer_ms: 100
   pbs_response_preparation_duration_ms: 100
+  upstream_response_buffer_ms: 50
 tmax_default: 600
 analytics:
   agma:
@@ -705,6 +707,7 @@ func TestFullConfig(t *testing.T) {
 	cmpUnsignedInts(t, "tmax_adjustments.bidder_response_duration_min_ms", 700, cfg.TmaxAdjustments.BidderResponseDurationMin)
 	cmpUnsignedInts(t, "tmax_adjustments.bidder_network_latency_buffer_ms", 100, cfg.TmaxAdjustments.BidderNetworkLatencyBuffer)
 	cmpUnsignedInts(t, "tmax_adjustments.pbs_response_preparation_duration_ms", 100, cfg.TmaxAdjustments.PBSResponsePreparationDuration)
+	cmpUnsignedInts(t, "tmax_adjustments.upstream_response_buffer_ms", 50, cfg.TmaxAdjustments.UpstreamResponseBuffer)
 	cmpInts(t, "tmax_default", 600, cfg.TmaxDefault)
 
 	//Assert the price floor values

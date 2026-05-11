@@ -279,6 +279,9 @@ func (deps *endpointDeps) VideoAuctionEndpoint(w http.ResponseWriter, r *http.Re
 
 	ctx := context.Background()
 	timeout := deps.cfg.AuctionTimeouts.LimitAuctionTimeout(time.Duration(bidReqWrapper.TMax) * time.Millisecond)
+	if deps.tmaxAdjustments != nil && deps.tmaxAdjustments.UpstreamResponseBuffer > 0 {
+		timeout -= time.Duration(deps.tmaxAdjustments.UpstreamResponseBuffer) * time.Millisecond
+	}
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, start.Add(timeout))

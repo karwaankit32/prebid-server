@@ -82,22 +82,22 @@ func TestProcessTMaxAdjustments(t *testing.T) {
 		{
 			description:     "BidderResponseDurationMin-is-not-set",
 			tmaxAdjustments: config.TmaxAdjustments{Enabled: true, BidderResponseDurationMin: 0, BidderNetworkLatencyBuffer: 10, PBSResponsePreparationDuration: 20},
-			expected:        &TmaxAdjustmentsPreprocessed{IsEnforced: false, BidderResponseDurationMin: 0, BidderNetworkLatencyBuffer: 10, PBSResponsePreparationDuration: 20},
+			expected:        &TmaxAdjustmentsPreprocessed{IsEnforced: false, BidderResponseDurationMin: 0, BidderNetworkLatencyBuffer: 10, PBSResponsePreparationDuration: 20, UpstreamResponseBuffer: 0},
 		},
 		{
 			description:     "BidderNetworkLatencyBuffer-and-PBSResponsePreparationDuration-are-not-set",
 			tmaxAdjustments: config.TmaxAdjustments{Enabled: true, BidderResponseDurationMin: 100, BidderNetworkLatencyBuffer: 0, PBSResponsePreparationDuration: 0},
-			expected:        &TmaxAdjustmentsPreprocessed{IsEnforced: false, BidderResponseDurationMin: 100, BidderNetworkLatencyBuffer: 0, PBSResponsePreparationDuration: 0},
+			expected:        &TmaxAdjustmentsPreprocessed{IsEnforced: false, BidderResponseDurationMin: 100, BidderNetworkLatencyBuffer: 0, PBSResponsePreparationDuration: 0, UpstreamResponseBuffer: 0},
 		},
 		{
 			description:     "BidderNetworkLatencyBuffer-is-not-set",
 			tmaxAdjustments: config.TmaxAdjustments{Enabled: true, BidderResponseDurationMin: 100, BidderNetworkLatencyBuffer: 0, PBSResponsePreparationDuration: 10},
-			expected:        &TmaxAdjustmentsPreprocessed{IsEnforced: true, BidderResponseDurationMin: 100, BidderNetworkLatencyBuffer: 0, PBSResponsePreparationDuration: 10},
+			expected:        &TmaxAdjustmentsPreprocessed{IsEnforced: true, BidderResponseDurationMin: 100, BidderNetworkLatencyBuffer: 0, PBSResponsePreparationDuration: 10, UpstreamResponseBuffer: 0},
 		},
 		{
 			description:     "PBSResponsePreparationDuration-is-not-set",
 			tmaxAdjustments: config.TmaxAdjustments{Enabled: true, BidderResponseDurationMin: 100, BidderNetworkLatencyBuffer: 10, PBSResponsePreparationDuration: 0},
-			expected:        &TmaxAdjustmentsPreprocessed{IsEnforced: true, BidderResponseDurationMin: 100, BidderNetworkLatencyBuffer: 10, PBSResponsePreparationDuration: 0},
+			expected:        &TmaxAdjustmentsPreprocessed{IsEnforced: true, BidderResponseDurationMin: 100, BidderNetworkLatencyBuffer: 10, PBSResponsePreparationDuration: 0, UpstreamResponseBuffer: 0},
 		},
 	}
 	for _, test := range tests {
