@@ -13,6 +13,7 @@ import (
 	gppConstants "github.com/prebid/go-gpp/constants"
 	"github.com/prebid/openrtb/v20/openrtb2"
 
+	"github.com/prebid/prebid-server/v4/analytics"
 	"github.com/prebid/prebid-server/v4/config"
 	"github.com/prebid/prebid-server/v4/errortypes"
 	"github.com/prebid/prebid-server/v4/firstpartydata"
@@ -190,11 +191,12 @@ func (rs *requestSplitter) cleanOpenRTBRequests(ctx context.Context,
 		auctionPermissions := gdprPerms.AuctionActivitiesAllowed(ctx, coreBidder, openrtb_ext.BidderName(bidder))
 
 		// privacy blocking
-		if rs.isBidderBlockedByPrivacy(reqWrapperCopy, auctionReq.Activities, auctionPermissions, coreBidder, openrtb_ext.BidderName(bidder)) {
+		if reason := rs.privacyBlockReason(reqWrapperCopy, auctionReq.Activities, auctionPermissions, coreBidder, openrtb_ext.BidderName(bidder)); reason != "" {
 			errs = append(errs, &errortypes.Warning{
 				Message:     fmt.Sprintf("bidder %q blocked by privacy settings", coreBidder),
 				WarningCode: errortypes.BidderBlockedByPrivacySettings,
 			})
+			filterImps(auctionReq.Lifecycle, bidder, imps, analytics.RequestBlockedPrivacy, reason)
 			continue
 		}
 
@@ -219,8 +221,10 @@ func (rs *requestSplitter) cleanOpenRTBRequests(ctx context.Context,
 		}
 
 		// down convert
+		openrtbVersion := "2.6"
 		info, ok := rs.bidderInfo[bidder]
 		if !ok || info.OpenRTB == nil || info.OpenRTB.Version != "2.6" {
+			openrtbVersion = "2.5"
 			reqWrapperCopy.Regs = ortb.CloneRegs(reqWrapperCopy.Regs)
 			if err := openrtb_ext.ConvertDownTo25(reqWrapperCopy); err != nil {
 				errs = append(errs, err)
@@ -259,10 +263,15 @@ func (rs *requestSplitter) cleanOpenRTBRequests(ctx context.Context,
 			BidderStoredResponses: bidderImpWithBidResp[openrtb_ext.BidderName(bidder)],
 			ImpReplaceImpId:       auctionReq.BidderImpReplaceImpID[bidder],
 			BidderLabels:          bidderLabels,
+			OpenRTBVersion:        openrtbVersion,
+			lifecycle:             auctionReq.Lifecycle,
 		}
 		bidderRequests = append(bidderRequests, bidderRequest)
 	}
 
+	if auctionReq.Lifecycle != nil {
+		recordUnpreparedBidders(auctionReq.Lifecycle, impsByBidder, bidderRequests)
+	}
 	return
 }
 
@@ -347,21 +356,22 @@ func PreloadExts(req *openrtb_ext.RequestWrapper) error {
 	return nil
 }
 
-func (rs *requestSplitter) isBidderBlockedByPrivacy(r *openrtb_ext.RequestWrapper, activities privacy.ActivityControl, auctionPermissions gdpr.AuctionPermissions, coreBidder, bidderName openrtb_ext.BidderName) bool {
+// privacyBlockReason returns why privacy blocks the bidder request, or "" when the request is allowed.
+func (rs *requestSplitter) privacyBlockReason(r *openrtb_ext.RequestWrapper, activities privacy.ActivityControl, auctionPermissions gdpr.AuctionPermissions, coreBidder, bidderName openrtb_ext.BidderName) string {
 	// activities control
 	scope := privacy.Component{Type: privacy.ComponentTypeBidder, Name: bidderName.String()}
 	fetchBidsActivityAllowed := activities.Allow(privacy.ActivityFetchBids, scope, privacy.NewRequestFromBidRequest(*r))
 	if !fetchBidsActivityAllowed {
-		return true
+		return filterDetailFetchBidsActivity
 	}
 
 	// gdpr
 	if !auctionPermissions.AllowBidRequest {
 		rs.me.RecordAdapterGDPRRequestBlocked(coreBidder)
-		return true
+		return filterDetailGDPR
 	}
 
-	return false
+	return ""
 }
 
 func (rs *requestSplitter) applyPrivacy(reqWrapper *openrtb_ext.RequestWrapper, coreBidderName openrtb_ext.BidderName, bidderName string, auctionReq AuctionRequest, auctionPermissions gdpr.AuctionPermissions, ccpaEnforcer privacy.PolicyEnforcer, lmt bool, coppa bool) error {

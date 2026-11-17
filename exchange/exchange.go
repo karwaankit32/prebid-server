@@ -16,6 +16,7 @@ import (
 
 	"github.com/prebid/prebid-server/v4/adapters"
 	"github.com/prebid/prebid-server/v4/adservertargeting"
+	"github.com/prebid/prebid-server/v4/analytics"
 	"github.com/prebid/prebid-server/v4/bidadjustment"
 	"github.com/prebid/prebid-server/v4/config"
 	"github.com/prebid/prebid-server/v4/currency"
@@ -96,6 +97,8 @@ type seatResponseExtra struct {
 	HttpCalls []*openrtb_ext.ExtHttpCall
 	// NonBid contains non bid reason information
 	NonBid *openrtb_ext.NonBid
+	// lifecycle holds what this bidder recorded, merged into the auction's lifecycle on the main goroutine.
+	lifecycle *analytics.AuctionLifecycle
 }
 
 type bidResponseWrapper struct {
@@ -218,6 +221,9 @@ type AuctionRequest struct {
 	TmaxAdjustments         *TmaxAdjustmentsPreprocessed
 	GDPRSignal              gdpr.Signal
 	GDPREnforced            bool
+	// Lifecycle is nil unless an analytics module records this auction. It is filled during the auction
+	// and never added to the response.
+	Lifecycle *analytics.AuctionLifecycle
 }
 
 // BidderRequest holds the bidder specific request and all other
@@ -230,6 +236,9 @@ type BidderRequest struct {
 	BidderStoredResponses map[string]json.RawMessage
 	IsRequestAlias        bool
 	ImpReplaceImpId       map[string]bool
+	OpenRTBVersion        string
+	// lifecycle is the auction's lifecycle; requestBid only reads it and records into its own copy.
+	lifecycle *analytics.AuctionLifecycle
 }
 
 func (e *exchange) HoldAuction(ctx context.Context, r *AuctionRequest, debugLog *DebugLog) (*AuctionResponse, error) {
@@ -237,6 +246,7 @@ func (e *exchange) HoldAuction(ctx context.Context, r *AuctionRequest, debugLog 
 		return nil, nil
 	}
 
+	startProcessedAuctionCapture(r.Lifecycle, r.HookExecutor)
 	err := r.HookExecutor.ExecuteProcessedAuctionStage(r.BidRequestWrapper)
 	if err != nil {
 		return nil, err
@@ -401,6 +411,13 @@ func (e *exchange) HoldAuction(ctx context.Context, r *AuctionRequest, debugLog 
 		if extraRespInfo.seatNonBidBuilder != nil {
 			seatNonBidBuilder = extraRespInfo.seatNonBidBuilder
 		}
+		if r.Lifecycle != nil {
+			for _, extra := range adapterExtra {
+				if extra != nil {
+					r.Lifecycle.Merge(extra.lifecycle)
+				}
+			}
+		}
 	}
 
 	var (
@@ -421,10 +438,13 @@ func (e *exchange) HoldAuction(ctx context.Context, r *AuctionRequest, debugLog 
 					Message:     fmt.Sprintf("%s bid id %s rejected - bid price %.4f %s is less than bid floor %.4f %s for imp %s", rejectedBid.Seat, rejectedBid.Bids[0].Bid.ID, rejectedBid.Bids[0].Bid.Price, rejectedBid.Currency, rejectedBid.Bids[0].BidFloors.FloorValue, rejectedBid.Bids[0].BidFloors.FloorCurrency, rejectedBid.Bids[0].Bid.ImpID),
 					WarningCode: errortypes.FloorBidRejectionWarningCode})
 				rejectionReason := ResponseRejectedBelowFloor
+				detail := "belowFloor"
 				if rejectedBid.Bids[0].Bid.DealID != "" {
 					rejectionReason = ResponseRejectedBelowDealFloor
+					detail = "belowDealFloor"
 				}
 				seatNonBidBuilder.rejectBid(rejectedBid.Bids[0], int(rejectionReason), rejectedBid.Seat)
+				markFilteredBid(r.Lifecycle, rejectedBid.Bids[0], int(rejectionReason), detail)
 			}
 		}
 
@@ -537,6 +557,7 @@ func (e *exchange) HoldAuction(ctx context.Context, r *AuctionRequest, debugLog 
 	// Build the response
 	bidResponse := e.buildBidResponse(ctx, liveAdapters, adapterBids, r.BidRequestWrapper, adapterExtra, auc, bidResponseExt, cacheInstructions.returnCreative, r.ImpExtInfoMap, r.PubID, errs, &seatNonBidBuilder)
 	bidResponse = adservertargeting.Apply(r.BidRequestWrapper, r.ResolvedBidRequest, bidResponse, r.QueryParams, bidResponseExt, r.Account.TruncateTargetAttribute)
+	reconcileFinalBids(r.Lifecycle, bidResponse)
 
 	bidResponse.Ext, err = encodeBidResponseExt(bidResponseExt)
 	if err != nil {
@@ -794,6 +815,7 @@ func (e *exchange) getAllBids(
 			// Append any bid validation errors to the error list
 			ae.Errors = errsToBidderErrors(err)
 			ae.Warnings = errsToBidderWarnings(err)
+			ae.lifecycle = extraBidderRespInfo.lifecycle
 			brw.adapterExtra = ae
 			for _, seatBid := range seatBids {
 				if seatBid != nil {

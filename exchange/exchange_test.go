@@ -21,6 +21,7 @@ import (
 	"github.com/buger/jsonparser"
 	"github.com/prebid/openrtb/v20/openrtb2"
 	"github.com/prebid/prebid-server/v4/adapters"
+	"github.com/prebid/prebid-server/v4/analytics"
 	"github.com/prebid/prebid-server/v4/config"
 	"github.com/prebid/prebid-server/v4/currency"
 	"github.com/prebid/prebid-server/v4/errortypes"
@@ -46,6 +47,7 @@ import (
 	"github.com/prebid/prebid-server/v4/util/ptrutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	jsonpatch "gopkg.in/evanphx/json-patch.v5"
 )
 
@@ -2088,11 +2090,35 @@ func TestExchangeJSON(t *testing.T) {
 			t.Run(fileDisplayName, func(t *testing.T) {
 				specData, err := loadFile(fileName)
 				if assert.NoError(t, err, "Failed to load contents of file %s: %v", fileDisplayName, err) {
-					assert.NotPanics(t, func() { runSpec(t, fileDisplayName, specData) }, fileDisplayName)
+					assert.NotPanics(t, func() { runSpec(t, fileDisplayName, specData, nil) }, fileDisplayName)
 				}
 			})
 		}
 	}
+}
+
+// TestExchangeJSONWithLifecycle reruns every exchangetest spec with lifecycle recording on, proving that the
+// request split, the merge of per-bidder records and response building leave the expected responses
+// unchanged. These specs use a mock in place of BidderAdapter.requestBid, whose recording is covered by
+// lifecycle_test.go.
+func TestExchangeJSONWithLifecycle(t *testing.T) {
+	specFiles, err := os.ReadDir("./exchangetest")
+	require.NoError(t, err)
+	recordedCalls := 0
+	for _, specFile := range specFiles {
+		if !strings.HasSuffix(specFile.Name(), ".json") {
+			continue
+		}
+		fileDisplayName := "exchange/exchangetest/" + specFile.Name()
+		t.Run(fileDisplayName, func(t *testing.T) {
+			specData, err := loadFile("./exchangetest/" + specFile.Name())
+			require.NoError(t, err)
+			lifecycle := recordedLifecycle("appnexus", "rubicon", "pubmatic", "openx", "audienceNetwork")
+			assert.NotPanics(t, func() { runSpec(t, fileDisplayName, specData, lifecycle) }, fileDisplayName)
+			recordedCalls += len(lifecycle.BidderRequestDetails)
+		})
+	}
+	assert.Positive(t, recordedCalls, "specs must reach the merge of per-bidder lifecycle records")
 }
 
 // LoadFile reads and parses a file as a test case. If something goes wrong, it returns an error.
@@ -2110,7 +2136,7 @@ func loadFile(filename string) (*exchangeSpec, error) {
 	return &spec, nil
 }
 
-func runSpec(t *testing.T, filename string, spec *exchangeSpec) {
+func runSpec(t *testing.T, filename string, spec *exchangeSpec, lifecycle *analytics.AuctionLifecycle) {
 	aliases, err := parseRequestAliases(spec.IncomingRequest.OrtbRequest)
 	if err != nil {
 		t.Fatalf("%s: Failed to parse aliases", filename)
@@ -2205,6 +2231,7 @@ func runSpec(t *testing.T, filename string, spec *exchangeSpec) {
 		Activities:    activityControl,
 		GDPRSignal:    gdprSignal,
 		GDPREnforced:  spec.GDPREnforced,
+		Lifecycle:     lifecycle,
 	}
 
 	if spec.MultiBid != nil {
@@ -5655,6 +5682,11 @@ func (b *validatingBidder) requestBid(ctx context.Context, bidderRequest BidderR
 		b.t.Errorf("%s: Bidder %s got unexpected request for alias %s. No mock responses.", b.fileName, b.bidderName, bidderRequest.BidderName)
 	}
 
+	// Mirror requestBid: a recorded auction gets one call record per bidder, merged by HoldAuction.
+	if lifecycle := newBidderLifecycle(bidderRequest.lifecycle); lifecycle != nil {
+		lifecycle.BidderRequestDetails = append(lifecycle.BidderRequestDetails, analytics.BidderRequestDetail{BidderRequestID: string(bidderRequest.BidderName) + "-0", Bidder: string(bidderRequest.BidderName)})
+		extaInfo.lifecycle = lifecycle
+	}
 	return
 }
 

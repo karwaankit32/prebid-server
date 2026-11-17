@@ -191,7 +191,8 @@ func (deps *endpointDeps) Auction(w http.ResponseWriter, r *http.Request, _ http
 	w.Header().Set("X-Prebid", version.BuildXPrebidHeader(version.Ver))
 	setBrowsingTopicsHeader(w, r)
 
-	req, impExtInfoMap, storedAuctionResponses, storedBidResponses, bidderImpReplaceImp, account, errL := deps.parseRequest(r, &labels, hookExecutor)
+	req, impExtInfoMap, storedAuctionResponses, storedBidResponses, bidderImpReplaceImp, account, lifecycle, errL := deps.parseRequest(r, &labels, hookExecutor)
+	ao.Lifecycle = lifecycle
 	if errortypes.ContainsFatalError(errL) && writeError(errL, w, &labels) {
 		return
 	}
@@ -263,6 +264,7 @@ func (deps *endpointDeps) Auction(w http.ResponseWriter, r *http.Request, _ http
 		TmaxAdjustments:            deps.tmaxAdjustments,
 		GDPRSignal:                 gdprSignal,
 		GDPREnforced:               gdprEnforced,
+		Lifecycle:                  ao.Lifecycle,
 	}
 	auctionResponse, err := deps.ex.HoldAuction(ctx, auctionRequest, nil)
 	defer func() {
@@ -416,7 +418,7 @@ func setBrowsingTopicsHeader(w http.ResponseWriter, r *http.Request) {
 // possible, it will return errors with messages that suggest improvements.
 //
 // If the errors list has at least one element, then no guarantees are made about the returned request.
-func (deps *endpointDeps) parseRequest(httpRequest *http.Request, labels *metrics.Labels, hookExecutor hookexecution.HookStageExecutor) (req *openrtb_ext.RequestWrapper, impExtInfoMap map[string]exchange.ImpExtInfo, storedAuctionResponses stored_responses.ImpsWithBidResponses, storedBidResponses stored_responses.ImpBidderStoredResp, bidderImpReplaceImpId stored_responses.BidderImpReplaceImpID, account *config.Account, errs []error) {
+func (deps *endpointDeps) parseRequest(httpRequest *http.Request, labels *metrics.Labels, hookExecutor hookexecution.HookStageExecutor) (req *openrtb_ext.RequestWrapper, impExtInfoMap map[string]exchange.ImpExtInfo, storedAuctionResponses stored_responses.ImpsWithBidResponses, storedBidResponses stored_responses.ImpBidderStoredResp, bidderImpReplaceImpId stored_responses.BidderImpReplaceImpID, account *config.Account, lifecycle *analytics.AuctionLifecycle, errs []error) {
 	errs = nil
 	var err error
 	var errL []error
@@ -477,7 +479,7 @@ func (deps *endpointDeps) parseRequest(httpRequest *http.Request, labels *metric
 
 	impInfo, errs := parseImpInfo(requestJson)
 	if len(errs) > 0 {
-		return nil, nil, nil, nil, nil, nil, errs
+		return nil, nil, nil, nil, nil, nil, nil, errs
 	}
 
 	storedBidRequestId, hasStoredBidRequest, storedRequests, storedImps, errs := deps.getStoredRequests(ctx, requestJson, impInfo)
@@ -523,7 +525,7 @@ func (deps *endpointDeps) parseRequest(httpRequest *http.Request, labels *metric
 	if hasPayloadUpdatesAt(hooks.StageRawAuctionRequest.String(), hookExecutor.GetOutcomes()) {
 		impInfo, errs = parseImpInfo(requestJson)
 		if len(errs) > 0 {
-			return nil, nil, nil, nil, nil, nil, errs
+			return nil, nil, nil, nil, nil, nil, nil, errs
 		}
 		storedBidRequestId, hasStoredBidRequest, storedRequests, storedImps, errs = deps.getStoredRequests(ctx, requestJson, impInfo)
 		if len(errs) > 0 {
@@ -573,16 +575,41 @@ func (deps *endpointDeps) parseRequest(httpRequest *http.Request, labels *metric
 	storedAuctionResponses, storedBidResponses, bidderImpReplaceImpId, errL = stored_responses.ProcessStoredResponses(ctx, req, deps.storedRespFetcher)
 	if len(errL) > 0 {
 		errs = append(errs, errL...)
-		return nil, nil, nil, nil, nil, nil, errs
+		return nil, nil, nil, nil, nil, nil, nil, errs
+	}
+
+	if lifecycleRunner, ok := deps.analytics.(analytics.LifecycleRunner); ok {
+		lifecycle = lifecycleRunner.BeginAuctionLifecycle(requestPassthrough(req))
 	}
 
 	hasStoredAuctionResponses := len(storedAuctionResponses) > 0
-	errL = deps.validateRequest(account, httpRequest, req, false, hasStoredAuctionResponses, storedBidResponses, hasStoredBidRequest)
+	errL = deps.validateAuctionRequest(account, httpRequest, req, false, hasStoredAuctionResponses, storedBidResponses, hasStoredBidRequest, lifecycle)
 	if len(errL) > 0 {
 		errs = append(errs, errL...)
 	}
 
 	return
+}
+
+// requestPassthrough returns the request's ext.prebid.passthrough, or nil when it is absent or unreadable.
+func requestPassthrough(req *openrtb_ext.RequestWrapper) json.RawMessage {
+	reqExt, err := req.GetRequestExt()
+	if err != nil {
+		return nil
+	}
+	if prebid := reqExt.GetPrebid(); prebid != nil {
+		return prebid.Passthrough
+	}
+	return nil
+}
+
+// validationFilterReporter records bidders that request validation removes from an impression.
+type validationFilterReporter struct {
+	lifecycle *analytics.AuctionLifecycle
+}
+
+func (r validationFilterReporter) ReportBidderRemoval(impID, bidder, reason string) {
+	r.lifecycle.AddFiltered(bidder, impID, analytics.RequestBlockedGeneral, reason)
 }
 
 func getCompressionEnabledReader(body io.ReadCloser, contentEncoding httputil.ContentEncoding) (io.ReadCloser, error) {
@@ -772,6 +799,11 @@ func mergeBidderParamsImpExtPrebid(impExt *openrtb_ext.ImpExt, reqExtParams map[
 }
 
 func (deps *endpointDeps) validateRequest(account *config.Account, httpReq *http.Request, req *openrtb_ext.RequestWrapper, isAmp bool, hasStoredAuctionResponses bool, storedBidResp stored_responses.ImpBidderStoredResp, hasStoredBidRequest bool) []error {
+	return deps.validateAuctionRequest(account, httpReq, req, isAmp, hasStoredAuctionResponses, storedBidResp, hasStoredBidRequest, nil)
+}
+
+// validateAuctionRequest is validateRequest that also records bidders removed during validation in lifecycle.
+func (deps *endpointDeps) validateAuctionRequest(account *config.Account, httpReq *http.Request, req *openrtb_ext.RequestWrapper, isAmp bool, hasStoredAuctionResponses bool, storedBidResp stored_responses.ImpBidderStoredResp, hasStoredBidRequest bool, lifecycle *analytics.AuctionLifecycle) []error {
 	errL := []error{}
 	if req.ID == "" {
 		return []error{errors.New("request missing required field: \"id\"")}
@@ -921,6 +953,10 @@ func (deps *endpointDeps) validateRequest(account *config.Account, httpReq *http
 	}
 
 	impIDs := make(map[string]int, req.LenImp())
+	validationConfig := ortb.ValidationConfig{}
+	if lifecycle != nil {
+		validationConfig.BidderRemovalReporter = validationFilterReporter{lifecycle: lifecycle}
+	}
 	for i, imp := range req.GetImp() {
 		// check for unique imp id
 		if firstIndex, ok := impIDs[imp.ID]; ok {
@@ -928,7 +964,7 @@ func (deps *endpointDeps) validateRequest(account *config.Account, httpReq *http
 		}
 		impIDs[imp.ID] = i
 
-		errs := deps.requestValidator.ValidateImp(imp, ortb.ValidationConfig{}, i, requestAliases, hasStoredAuctionResponses, storedBidResp)
+		errs := deps.requestValidator.ValidateImp(imp, validationConfig, i, requestAliases, hasStoredAuctionResponses, storedBidResp)
 		if len(errs) > 0 {
 			errL = append(errL, errs...)
 		}

@@ -59,16 +59,49 @@ func New(analytics *config.Analytics) analytics.Runner {
 	return modules
 }
 
+// NewWithModules is New plus additional analytics modules registered by the host.
+func NewWithModules(cfg *config.Analytics, extra map[string]analytics.Module) analytics.Runner {
+	modules := New(cfg).(enabledAnalytics)
+	for name, mod := range extra {
+		if mod != nil {
+			modules[name] = mod
+		}
+	}
+	return modules
+}
+
 // Collection of all the correctly configured analytics modules - implements the PBSAnalyticsModule interface
 type enabledAnalytics map[string]analytics.Module
 
+func (ea enabledAnalytics) BeginAuctionLifecycle(passthrough json.RawMessage) *analytics.AuctionLifecycle {
+	var options map[string]*analytics.LifecycleOptions
+	for name, module := range ea {
+		lifecycleModule, ok := module.(analytics.LifecycleModule)
+		if !ok {
+			continue
+		}
+		opts := lifecycleModule.AuctionLifecycleOptions(passthrough)
+		if opts == nil {
+			continue
+		}
+		if options == nil {
+			options = make(map[string]*analytics.LifecycleOptions, 1)
+		}
+		options[name] = opts
+	}
+	return analytics.NewAuctionLifecycle(options)
+}
+
 func (ea enabledAnalytics) LogAuctionObject(ao *analytics.AuctionObject, ac privacy.ActivityControl) {
+	all := ao.Lifecycle
+	defer func() { ao.Lifecycle = all }()
 	for name, module := range ea {
 		if isAllowed, cloneBidderReq := evaluateActivities(ao.RequestWrapper, ac, name); isAllowed {
 			if cloneBidderReq != nil {
 				ao.RequestWrapper = cloneBidderReq
 			}
 			cloneReq := updateReqWrapperForAnalytics(ao.RequestWrapper, name, cloneBidderReq != nil)
+			ao.Lifecycle = all.ForModule(name, cloneBidderReq != nil)
 			module.LogAuctionObject(ao)
 			if cloneReq != nil {
 				ao.RequestWrapper = cloneReq

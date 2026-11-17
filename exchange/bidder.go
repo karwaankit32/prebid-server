@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prebid/prebid-server/v4/analytics"
 	"github.com/prebid/prebid-server/v4/bidadjustment"
 	"github.com/prebid/prebid-server/v4/config/util"
 	"github.com/prebid/prebid-server/v4/currency"
@@ -84,6 +85,7 @@ type bidRequestOptions struct {
 type extraBidderRespInfo struct {
 	respProcessingStartTime time.Time
 	seatNonBidBuilder       SeatNonBidBuilder
+	lifecycle               *analytics.AuctionLifecycle
 }
 
 type extraAuctionResponseInfo struct {
@@ -180,8 +182,10 @@ func (bidder *BidderAdapter) requestBid(ctx context.Context, bidderRequest Bidde
 	request := openrtb_ext.RequestWrapper{BidRequest: bidderRequest.BidRequest}
 	reject := hookExecutor.ExecuteBidderRequestStage(&request, string(bidderRequest.BidderName))
 	seatNonBidBuilder := SeatNonBidBuilder{}
+	lifecycle := newBidderLifecycle(bidderRequest.lifecycle)
 	if reject != nil {
-		return nil, extraBidderRespInfo{}, []error{reject}
+		filterImps(lifecycle, string(bidderRequest.BidderName), bidderRequest.BidRequest.Imp, analytics.RequestBlockedGeneral, hookRejectDetail(reject))
+		return nil, extraBidderRespInfo{lifecycle: lifecycle}, []error{reject}
 	}
 
 	var (
@@ -189,7 +193,9 @@ func (bidder *BidderAdapter) requestBid(ctx context.Context, bidderRequest Bidde
 		errs            []error
 		responseChannel chan *httpCallInfo
 		extraRespInfo   extraBidderRespInfo
+		impMedia        map[string]impMediaTypeSummary
 	)
+	extraRespInfo.lifecycle = lifecycle
 
 	// rebuild request after modules execution
 	request.RebuildRequest()
@@ -203,14 +209,26 @@ func (bidder *BidderAdapter) requestBid(ctx context.Context, bidderRequest Bidde
 		if bidRequestOptions.tmaxAdjustments != nil && bidRequestOptions.tmaxAdjustments.IsEnforced {
 			bidderRequest.BidRequest.TMax = getBidderTmax(&bidderTmaxCtx{ctx}, bidderRequest.BidRequest.TMax, *bidRequestOptions.tmaxAdjustments)
 		}
+		var initialMedia map[string][]string
+		var candidateIDs []string
+		if lifecycle != nil {
+			reqInfo.SetImpRemovalReporter(capabilityFilterReporter{lifecycle: lifecycle, bidder: string(bidderRequest.BidderName)})
+			// Adapters and InfoAwareBidder may mutate or reassign request.Imp, so snapshot media types and IDs before MakeRequests.
+			initialMedia = impMediaTypes(bidderRequest.BidRequest.Imp)
+			candidateIDs = impIDs(bidderRequest.BidRequest.Imp)
+		}
 		reqData, errs = bidder.Bidder.MakeRequests(bidderRequest.BidRequest, reqInfo)
+		recordUnplacedImps(lifecycle, string(bidderRequest.BidderName), candidateIDs, reqData)
 
 		if len(reqData) == 0 {
 			// If the adapter failed to generate both requests and errors, this is an error.
 			if len(errs) == 0 {
 				errs = append(errs, &errortypes.FailedToRequestBids{Message: "The adapter failed to generate any bid requests, but also failed to generate an error explaining why"})
 			}
-			return nil, extraBidderRespInfo{}, errs
+			return nil, extraBidderRespInfo{lifecycle: lifecycle}, errs
+		}
+		if lifecycle != nil {
+			impMedia = summarizeImpMediaTypes(initialMedia, bidderRequest.BidRequest.Imp)
 		}
 		xPrebidHeader := version.BuildXPrebidHeaderForRequest(bidderRequest.BidRequest, version.Ver)
 
@@ -280,6 +298,7 @@ func (bidder *BidderAdapter) requestBid(ctx context.Context, bidderRequest Bidde
 	// even if the timeout occurs sometime halfway through.
 	for i := 0; i < dataLen; i++ {
 		httpInfo := <-responseChannel
+		call := recordBidderCall(lifecycle, bidderRequest, httpInfo, impMedia)
 		// If this is a test bid, capture debugging info from the requests.
 		// Write debug data to ext in case if:
 		// - headerDebugAllowed (debug override header specified correct) - it overrides all other debug restrictions
@@ -305,6 +324,7 @@ func (bidder *BidderAdapter) requestBid(ctx context.Context, bidderRequest Bidde
 			extraRespInfo.respProcessingStartTime = time.Now()
 			bidResponse, moreErrs := bidder.Bidder.MakeBids(bidderRequest.BidRequest, httpInfo.request, httpInfo.response)
 			errs = append(errs, moreErrs...)
+			recordDecodedBids(lifecycle, call, bidResponse, moreErrs)
 
 			if bidResponse != nil {
 				reject := hookExecutor.ExecuteRawBidderResponseStage(bidResponse, string(bidder.BidderName))
@@ -633,8 +653,10 @@ func (bidder *BidderAdapter) doRequestImpl(ctx context.Context, req *adapters.Re
 			}
 		}
 		return &httpCallInfo{
-			request: req,
-			err:     err,
+			request:  req,
+			err:      err,
+			sent:     true,
+			duration: time.Since(httpCallStart),
 		}
 	}
 	defer httpResp.Body.Close()
@@ -642,8 +664,10 @@ func (bidder *BidderAdapter) doRequestImpl(ctx context.Context, req *adapters.Re
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		return &httpCallInfo{
-			request: req,
-			err:     err,
+			request:  req,
+			err:      err,
+			sent:     true,
+			duration: time.Since(httpCallStart),
 		}
 	}
 
@@ -665,7 +689,9 @@ func (bidder *BidderAdapter) doRequestImpl(ctx context.Context, req *adapters.Re
 			Body:       respBody,
 			Headers:    httpResp.Header,
 		},
-		err: err,
+		err:      err,
+		sent:     true,
+		duration: time.Since(httpCallStart),
 	}
 }
 
@@ -724,6 +750,9 @@ type httpCallInfo struct {
 	request  *adapters.RequestData
 	response *adapters.ResponseData
 	err      error
+	// sent is true once the request was handed to the HTTP client; duration covers that exchange.
+	sent     bool
+	duration time.Duration
 }
 
 // This function adds an httptrace.ClientTrace object to the context so, if connection with the bidder
